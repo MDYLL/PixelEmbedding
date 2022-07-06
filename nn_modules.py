@@ -1,4 +1,4 @@
-from unet3plus import UNet3Plus
+from unet_model import UNet
 import numpy as np
 import torch
 from torch import nn
@@ -25,7 +25,7 @@ class DiceBCELoss(nn.Module):
         Dice_BCE = BCE + dice_loss       
         return Dice_BCE
 
-backbone = UNet3Plus()
+backbone = UNet(n_channels=3, n_classes=64, bilinear=False)
 
 class Decoder2Vector(torch.nn.Module):
     def __init__(self, num_out=1):
@@ -45,7 +45,6 @@ class Decoder2Mat(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.conv = nn.Conv2d(64, 1, 1)
-        # self.sigmoid = nn.Sigmoid()   
     def forward(self, x):
         x = self.conv(x)
         x = torch.sigmoid(x)
@@ -60,44 +59,9 @@ class Image2VectorWithPairwise(torch.nn.Module):
         x = self.encoder(x)
         return self.decoder(x)
     def compute_loss(self, positive, negative):
-        # positive_target = self.forward(positive)
-        # negative_target = self.forward(negative)
-        # positive_target = F.sigmoid(positive_target)
-        # negative_target = F.sigmoid(negative_target)
         diff = negative - positive
         return torch.where(diff < 10, torch.log(torch.exp(diff) + 1), diff).mean()
         
-
-class Image2VectorWithCE(torch.nn.Module):
-    def __init__(self, num_out=2):
-        super().__init__()
-        self.encoder = backbone
-        self.decoder = Decoder2Vector(num_out=num_out)    
-    def forward(self, x):
-        x = self.encoder(x)
-        return self.decoder(x)
-    def compute_loss(self, predictions, gt):
-        return F.cross_entropy(predictions, gt).mean()
-    def post_processing(self, prediction):
-        return prediction.max(1)[1].data
-    def metric(self, y_batch, y_pred):
-        return (y_batch.cpu() == y_pred.cpu()).float().mean()
-
-class Image2VectorWithMSE(torch.nn.Module): 
-    def __init__(self, num_out=10):
-        super().__init__()
-        self.encoder = backbone
-        self.decoder = Decoder2Vector(num_out=num_out)   
-    def forward(self, x):
-        x = self.encoder(x)
-        return self.decoder(x)
-    def compute_loss(self, predictions, gt):
-        return F.mse_loss(predictions, gt).mean()
-    def post_processing(self, prediction):
-        return prediction
-    def metric(self, y_batch, y_pred):
-        return F.mse_loss(y_pred, y_batch).mean()
-
 class Image2Image(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -110,7 +74,7 @@ class Image2Image(torch.nn.Module):
         loss = DiceBCELoss()
         return loss(predictions, gt)
     def post_processing(self, prediction):
-        return prediction>0.5
+        return prediction  > 0.5
     def metric(self, y_batch, y_pred):
         return calc_iou(y_pred, y_batch)
 

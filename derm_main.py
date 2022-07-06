@@ -12,7 +12,6 @@ from torch.utils.data import Dataset
 import pickle
 import shutil
 from sklearn.metrics import roc_auc_score
-from unet3plus import UNet3Plus
 
 PATH_TO_CELEBA = "/home/dmartynov/shad/celeba/celeba/"
 PATH_TO_CELEBA_MASK = "/home/dmartynov/shad/CelebAMask-HQ/CelebA-HQ-img/"
@@ -28,6 +27,8 @@ def get_computing_device():
 
 device = get_computing_device()
 print(f"Our main computing device is '{device}'")
+
+torch.cuda.empty_cache()
 
 def load_attributes(file_path):
     annots = {}
@@ -63,18 +64,18 @@ def get_paths(path, first, last, max_ident=None):
     # print(np.stack(images_paths[first:last]))
     return np.stack(images_paths[first:last])
 
-DATASET_QUANTITY = 12
-DATASET_QUANTITY_CLASS = 8
+DATASET_QUANTITY = 8
+DATASET_QUANTITY_CLASS = 4
 DATASET_QUANTITY_SEGM = 4
-DATASET_SIZE = 256
+DATASET_SIZE = 2048
 DATASET_SIZE_VALIDATION = 512
 train_datasets = [None] * DATASET_QUANTITY
 val_datasets = [None] * DATASET_QUANTITY
 nn_modules = [None] * DATASET_QUANTITY
 # backbone = UNet3Plus().to(device)
 
-from datasets import CelebaBinaryCalssification, CelebaSegmentation, CelebaBinaryCalssificationPairwise
-from nn_modules import Image2VectorWithCE, Image2VectorWithMSE, Image2Image, Image2VectorWithPairwise, Decoder2Vector
+from datasets import CelebaSegmentation, CelebaBinaryCalssificationPairwise
+from nn_modules import Image2Image, Image2VectorWithPairwise, Decoder2Vector
 
 for i in range(DATASET_QUANTITY):    
     if i < DATASET_QUANTITY_CLASS:    
@@ -95,7 +96,7 @@ for i in range(DATASET_QUANTITY):
 
 
 
-batch_size = 2
+batch_size = 8
 train_batch_gens = [torch.utils.data.DataLoader(train_datasets[i],
                                               batch_size=batch_size,
                                               shuffle=True,
@@ -107,20 +108,24 @@ val_batch_gens = [torch.utils.data.DataLoader(val_datasets[i],
                                             num_workers=0) for i in range(DATASET_QUANTITY)]
 
 for i in range(DATASET_QUANTITY):
-    # nn_modules[i].load_state_dict(torch.load("nn_module_train_backbone_pairwise1e4_" + str(DATASET_QUANTITY) + '_' + str(DATASET_SIZE) + '_' + str(i) + ".pt"))
+    nn_modules[i].load_state_dict(torch.load("/media/4TB_local/shad/nn_module_common_wd0_" + str(DATASET_QUANTITY) + '_' + str(DATASET_SIZE) + '_' + str(i) + ".pt"))
     nn_modules[i].to(device)
 
 # was weight_decay=3e-5
-optimizers = [torch.optim.Adam(nn_modules[i].parameters(), lr=1e-6, weight_decay=0) for i in range(DATASET_QUANTITY)]
-schedulers = [torch.optim.lr_scheduler.CyclicLR(optimizers[i], base_lr=1e-6, max_lr=1e-3, cycle_momentum=False, mode="exp_range") for i in range(DATASET_QUANTITY)]
+optimizers = [torch.optim.RMSprop(nn_modules[i].parameters(), lr=1e-5, weight_decay=1e-8, momentum=0.9) for i in range(DATASET_QUANTITY)]
+schedulers = [torch.optim.lr_scheduler.ReduceLROnPlateau(optimizers[i], 'max', patience=2) for i in range(DATASET_QUANTITY)]
+grad_scalers = [torch.cuda.amp.GradScaler(enabled=False) for i in range(DATASET_QUANTITY)]
 
-# for i in range(DATASET_QUANTITY):
-    # optimizers[i].load_state_dict(torch.load("optimizer1e4_" + str(DATASET_QUANTITY) + '_' + str(DATASET_SIZE) + '_' + str(i) + ".pt"))
+for i in range(DATASET_QUANTITY):
+    optimizers[i].load_state_dict(torch.load("/media/4TB_local/shad/optimizer_wd0_" + str(DATASET_QUANTITY) + '_' + str(DATASET_SIZE) + '_' + str(i) + ".pt"))
+    schedulers[i].load_state_dict(torch.load("/media/4TB_local/shad/scheduler_wd0_" + str(DATASET_QUANTITY) + '_' + str(DATASET_SIZE) + '_' + str(i) + ".pt"))
 
 NUM_EPOCHS = 200
 train_loss = [list() for _ in range(DATASET_QUANTITY)]
 results = [list() for _ in range(DATASET_QUANTITY)]
 
+with open("/media/4TB_local/shad/common_wd0_" + str(DATASET_QUANTITY) + "_" + str(DATASET_SIZE) + ".pkl", 'rb') as f:
+    results = pickle.load(f)
 
 NUM_EPOCHS = 200
 for epoch in range(NUM_EPOCHS):
@@ -133,28 +138,37 @@ for epoch in range(NUM_EPOCHS):
     for idx, batch in tqdm.tqdm(enumerate(zip(*train_batch_gens))):
         for i in range(DATASET_QUANTITY_CLASS):
 
-            X_batch = batch[i][0].to(device)
-            y_batch = batch[i][1].to(device)
-            positive = nn_modules[i](X_batch)
-            negative = nn_modules[i](y_batch)
-            loss = nn_modules[i].compute_loss(positive, negative)
-            train_loss[i].append(loss.cpu().data.numpy())
-            loss.backward()
-            optimizers[i].step()
-            schedulers[i].step()
-            optimizers[i].zero_grad()
+            with torch.cuda.amp.autocast(enabled=False):
+
+                X_batch = batch[i][0].to(device)
+                y_batch = batch[i][1].to(device)
+                positive = nn_modules[i](X_batch)
+                negative = nn_modules[i](y_batch)
+                loss = nn_modules[i].compute_loss(positive, negative)
+                train_loss[i].append(loss.cpu().data.numpy())
+            
+            # for p in nn_modules[i].encoder.outc.parameters():
+            #     print ("grad ", (abs(p)).sum())
+            optimizers[i].zero_grad(set_to_none=True)
+            grad_scalers[i].scale(loss).backward()
+            grad_scalers[i].step(optimizers[i])
+            grad_scalers[i].update()
         
         for i in range(DATASET_QUANTITY_CLASS, DATASET_QUANTITY):
-            X_batch = batch[i][0].to(device)
-            y_batch = batch[i][1].to(device)
-            predictions = nn_modules[i](X_batch)
-            loss = nn_modules[i].compute_loss(predictions,y_batch)
-            train_loss[i].append(loss.cpu().data.numpy())
 
-            loss.backward()
-            optimizers[i].step()      
-            schedulers[i].step()
-            optimizers[i].zero_grad()                  
+            with torch.cuda.amp.autocast(enabled=False):
+                X_batch = batch[i][0].to(device)
+                y_batch = batch[i][1].to(device)
+                predictions = nn_modules[i](X_batch)
+                loss = nn_modules[i].compute_loss(predictions,y_batch)
+                train_loss[i].append(loss.cpu().data.numpy())
+
+            # for p in nn_modules[i].encoder.outc.parameters():
+            #     print ("grad ", (abs(p)).sum())
+            optimizers[i].zero_grad(set_to_none=True)
+            grad_scalers[i].scale(loss).backward()
+            grad_scalers[i].step(optimizers[i])
+            grad_scalers[i].update()           
 
     print("train loss")
     for i in range(DATASET_QUANTITY):
@@ -310,10 +324,13 @@ for epoch in range(NUM_EPOCHS):
         print(i, np.mean(metric))
         results[i][-1].append(np.mean(metric))                                                 
 
-    with open('common_wd0_' + str(DATASET_QUANTITY) + '_' + str(DATASET_SIZE) + '.pkl', 'wb') as f:
+    with open('./checkpoints/common_wd0_' + str(DATASET_QUANTITY) + '_' + str(DATASET_SIZE) + '.pkl', 'wb') as f:
         pickle.dump(results, f)
+    with open('/media/4TB_local/shad/common_wd0_' + str(DATASET_QUANTITY) + '_' + str(DATASET_SIZE) + '.pkl', 'wb') as f:
+        pickle.dump(results, f)        
 
+    torch.save(nn_modules[0].encoder.state_dict(), "./checkpoints/backbone_" + str(DATASET_QUANTITY) + '_' + str(DATASET_SIZE) + ".pt")
     for i in range(DATASET_QUANTITY):
-        torch.save(nn_modules[i].state_dict(), "nn_module_common_wd0_" + str(DATASET_QUANTITY) + '_' + str(DATASET_SIZE) + '_' + str(i) + ".pt")
-        torch.save(optimizers[i].state_dict(), "optimizer_wd0_" + str(DATASET_QUANTITY) + '_' + str(DATASET_SIZE) + '_' + str(i) + ".pt")
-        torch.save(schedulers[i].state_dict(), "scheduler_wd0_" + str(DATASET_QUANTITY) + '_' + str(DATASET_SIZE) + '_' + str(i) + ".pt")
+        torch.save(nn_modules[i].state_dict(), "/media/4TB_local/shad/nn_module_common_wd0_" + str(DATASET_QUANTITY) + '_' + str(DATASET_SIZE) + '_' + str(i) + ".pt")
+        torch.save(optimizers[i].state_dict(), "/media/4TB_local/shad/optimizer_wd0_" + str(DATASET_QUANTITY) + '_' + str(DATASET_SIZE) + '_' + str(i) + ".pt")
+        torch.save(schedulers[i].state_dict(), "/media/4TB_local/shad/scheduler_wd0_" + str(DATASET_QUANTITY) + '_' + str(DATASET_SIZE) + '_' + str(i) + ".pt")

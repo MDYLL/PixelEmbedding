@@ -66,8 +66,8 @@ def get_paths(path, first, last, max_ident=None):
 DATASET_QUANTITY = 12
 DATASET_QUANTITY_CLASS = 12
 DATASET_QUANTITY_SEGM = 0
-DATASET_SIZE = 32
-DATASET_SIZE_VALIDATION = 32
+DATASET_SIZE = 256
+DATASET_SIZE_VALIDATION = 256
 train_datasets = [None] * DATASET_QUANTITY
 val_datasets = [None] * DATASET_QUANTITY
 nn_modules = [None] * DATASET_QUANTITY
@@ -81,8 +81,8 @@ for i in range(DATASET_QUANTITY):
         train_images = get_paths(PATH_TO_CELEBA + "img_align_celeba/", 160_000, 160_000 + DATASET_SIZE)
         test_images = get_paths(PATH_TO_CELEBA + "img_align_celeba/", 170_000, 170_000 + DATASET_SIZE_VALIDATION)
 
-        train_datasets[i] = CelebaBinaryCalssificationPairwise(train_images, attributes_list, annots, attributes_list[i + 8])
-        val_datasets[i] = CelebaBinaryCalssificationPairwise(test_images, attributes_list, annots, attributes_list[i + 8])
+        train_datasets[i] = CelebaBinaryCalssificationPairwise(train_images, attributes_list, annots, attributes_list[i % 4 + 8])
+        val_datasets[i] = CelebaBinaryCalssificationPairwise(test_images, attributes_list, annots, attributes_list[i % 4 + 8])
         nn_modules[i] = Image2VectorWithPairwise()
     else:
         j = i - DATASET_QUANTITY_CLASS
@@ -96,12 +96,12 @@ for i in range(DATASET_QUANTITY):
 for i in range(DATASET_QUANTITY):
     nn_modules[i].encoder = UNet3Plus()
 
-for i in range(4, 12):
+for i in range(DATASET_QUANTITY // 3, DATASET_QUANTITY):
     nn_modules[i].load_state_dict(torch.load("nn_module_common_wd1e5_12_512_0.pt"))
     nn_modules[i].decoder = Decoder2Vector(num_out=1)
 
-for i in range(4, 11):
-    for j in range(i+1, 12):
+for i in range(DATASET_QUANTITY // 3, DATASET_QUANTITY - 1):
+    for j in range(i+1, DATASET_QUANTITY):
         print(nn_modules[i].encoder is nn_modules[j].encoder)
 
 batch_size = 2
@@ -120,8 +120,8 @@ for i in range(DATASET_QUANTITY):
     nn_modules[i].to(device)
 
 # was weight_decay=3e-5
-optimizers = [torch.optim.Adam(nn_modules[i].parameters(), lr=1e-4, weight_decay=1e-6) for i in range(DATASET_QUANTITY)]
-# schedulers = [torch.optim.lr_scheduler.CyclicLR(optimizers[i], base_lr=1e-6, max_lr=1e-3, gamma=0.9, cycle_momentum=False, mode="exp_range") for i in range(DATASET_QUANTITY)]
+optimizers = [torch.optim.Adam(nn_modules[i].parameters(), lr=1e-3, weight_decay=1e-3) for i in range(DATASET_QUANTITY)]
+schedulers = [torch.optim.lr_scheduler.CyclicLR(optimizers[i], base_lr=1e-3, max_lr=1e-1, gamma=0.9, cycle_momentum=False, mode="exp_range") for i in range(DATASET_QUANTITY)]
 
 # for i in range(DATASET_QUANTITY):
     # optimizers[i].load_state_dict(torch.load("optimizer1e4_" + str(DATASET_QUANTITY) + '_' + str(DATASET_SIZE) + '_' + str(i) + ".pt"))
@@ -142,7 +142,7 @@ for epoch in range(NUM_EPOCHS):
     for idx, batch in tqdm.tqdm(enumerate(zip(*train_batch_gens))):
         for i in range(DATASET_QUANTITY_CLASS):
 
-            if i >=4 and i <= 7:
+            if i >=DATASET_QUANTITY // 3 and i < DATASET_QUANTITY * 2 // 3:
                 for p in nn_modules[i].encoder.parameters():
                     p.requires_grad = False
             else:
@@ -157,7 +157,7 @@ for epoch in range(NUM_EPOCHS):
             train_loss[i].append(loss.cpu().data.numpy())
             loss.backward()
             optimizers[i].step()
-            # schedulers[i].step()
+            schedulers[i].step()
             optimizers[i].zero_grad()
         
         for i in range(DATASET_QUANTITY_CLASS, DATASET_QUANTITY):
@@ -169,7 +169,7 @@ for epoch in range(NUM_EPOCHS):
 
             loss.backward()
             optimizers[i].step()      
-            # schedulers[i].step()
+            schedulers[i].step()
             optimizers[i].zero_grad()                  
 
     print("train loss")
